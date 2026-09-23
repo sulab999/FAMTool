@@ -5,7 +5,7 @@ members = ["crates/core", "crates/cli", "crates/gui"]
 [workspace.package]
 version = "1.0.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "GPL-3.0-only"
 
 [workspace.dependencies]
 notify = "8"
