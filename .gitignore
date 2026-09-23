@@ -1,0 +1,15 @@
+/target
+/target-linux
+/dist
+famtool.log
+FAMTool.app
+FAMTool.app.*
+
+*.store/
+*.key
+
+node_modules/
+crates/gui/gen/
+
+crates/gui/resources/famtool-audit
+.DS_Store

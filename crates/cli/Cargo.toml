@@ -1,0 +1,19 @@
+[package]
+name = "famtool-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "跨平台文件/文件夹操作监控记录工具(CLI)"
+
+[[bin]]
+name = "famtool"
+path = "src/main.rs"
+
+[dependencies]
+famtool-core = { path = "../core" }
+clap = { version = "4", features = ["derive"] }
+ctrlc = { workspace = true }
+chrono = { workspace = true }
+dunce = { workspace = true }
+
+serde_json = { workspace = true }

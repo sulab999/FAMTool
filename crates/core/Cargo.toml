@@ -1,0 +1,22 @@
+[package]
+name = "famtool-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "文件/文件夹监控核心库(事件采集、聚合、日志)"
+
+[dependencies]
+notify = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dunce = { workspace = true }
+
+rusqlite = { version = "0.32", features = ["bundled"] }
+aes-gcm = "0.10"
+fs2 = "0.4"
+tempfile = "3"
+
+# 进程/用户归因(getpwuid_r)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

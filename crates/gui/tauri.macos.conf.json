@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "resources": { "../../AUDIT.md": "AUDIT.md" },
+    "macOS": { "files": {
+      "MacOS/audit-helper": "resources/famtool-audit",
+      "Library/LaunchDaemons/com.famtool.audit.plist": "../../native/audit/com.famtool.audit.plist"
+    } }
+  }
+}

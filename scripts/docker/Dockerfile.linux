@@ -1,0 +1,22 @@
+# Linux 打包镜像:Tauri 2 桌面应用编译与 deb/rpm 生成环境
+# 用法见 scripts/make_linux_docker.sh
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl build-essential pkg-config libssl-dev file \
+        libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
+        libfuse2 patchelf desktop-file-utils xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
+    && cargo install tauri-cli --version 2.11.5 --locked
+
+# LTO 编译内存峰值高,VM 内限制并行度防止 OOM(运行时可被 WJ_CARGO_JOBS 覆盖)
+ENV CARGO_BUILD_JOBS=2
+
+WORKDIR /work
+CMD ["bash"]

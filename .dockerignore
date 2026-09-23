@@ -1,0 +1,16 @@
+# Docker 构建上下文瘦身(镜像构建通过 scripts/make_linux_docker.sh)
+target
+target-linux
+dist
+build-assets
+node_modules
+.git
+.github
+*.store
+FAMTool.app
+FAMTool.app.*
+*.dmg
+*.exe
+*.deb
+*.rpm
+*.AppImage
