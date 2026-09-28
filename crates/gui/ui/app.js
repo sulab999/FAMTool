@@ -82,7 +82,7 @@ $('audit-enable').onclick = openAuditPrompt;
 $('audit-banner-close').onclick = () => { auditBannerDismissed = true; $('audit-banner').hidden = true; };
 
 // ---- 软件更新 ----
-invoke('plugin:app|version').then(v => { $('update-current').textContent = v; }).catch(() => {});
+invoke('plugin:app|version').then(v => { $('update-current').textContent = v; const badge = $('app-version'); if (badge) badge.textContent = v; }).catch(() => {});
 let updateBusy = false, updateInfo = null, downloadedPath = null;
 async function checkUpdate(manual) {
   if (updateBusy) return;
