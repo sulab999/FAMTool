@@ -4,9 +4,9 @@
 
 | 平台 | 底层机制 |
 |---|---|
-| Windows | ReadDirectoryChangesW |
-| Linux | inotify |
-| macOS | FSEvents（可选原生系统审计） |
+| Windows | ReadDirectoryChangesW（可选原生系统审计：SACL + 安全日志） |
+| Linux | inotify（可选原生系统审计：内核 fanotify） |
+| macOS | FSEvents（可选原生系统审计：Endpoint Security / OpenBSM） |
 
 ## 项目结构
 
@@ -48,7 +48,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## 打包（单脚本）
 
-全部打包流程集中在 **`scripts/package.sh`** 一个脚本内：
+全部打包流程集中在 **`scripts/package.sh`** 一个脚本内。脚本在打包前自动跑前端测试自检（`WJ_SKIP_CHECKS=1` 可跳过），为每个目标三元组构建 audit-pipe sidecar（`tauri.conf.json` 的 `externalBin` 要求其存在于 `crates/gui/binaries/`），构建后校验产物落盘并生成 `dist/SHA256SUMS` 校验清单；出错时会打印脚本行号定位。
 
 ```bash
 ./scripts/package.sh                          # 全部平台(缺依赖的平台自动跳过并提示)
@@ -57,14 +57,16 @@ cargo clippy --workspace --all-targets -- -D warnings
 ./scripts/package.sh windows                  # Windows NSIS 安装程序
 ./scripts/package.sh linux                    # Linux deb+rpm(本机 Docker 架构)
 ./scripts/package.sh linux --platform amd64   # x86_64(需 Docker Rosetta/QEMU)
+./scripts/package.sh clean                    # 清理 dist/ 与打包中间产物
+./scripts/package.sh --help
 ```
 
 各平台依赖：
 
-- **macOS**：脚本执行 Tauri 打包、放入审计辅助程序、签名并用 `hdiutil` 生成 DMG。设置 `WJ_APP_SIGN_IDENTITY` 切换为正式开发者签名。审计辅助程序按目标架构单独编译，故不提供 universal 包。
-- **Windows**：从 macOS/Linux 交叉构建需要 `cargo install cargo-xwin`、`brew install llvm nsis`（MSI/WiX 只能在 Windows 宿主生成；GitHub Actions 的 Windows 任务可直接产出 NSIS+MSI）。
-- **Linux**：Ubuntu 22.04 容器内编译（`scripts/docker/Dockerfile.linux`），依赖清单见 `tauri.conf.json` 的 `bundle.linux`。容器内默认 2 路并行编译防 VM 内存不足（`WJ_CARGO_JOBS=n` 调整）；增量产物损坏时 `WJ_CLEAN=1` 重跑。
-- **CI**：`.github/workflows/build.yml` 在 GitHub 官方运行器上构建全部平台（Windows 附加 MSI），推送 `v*` 标签或手动触发。
+- **macOS**：脚本执行 Tauri 打包、签名并用 `hdiutil` 生成 DMG（自动做 `hdiutil verify` 完整性校验）。设置 `WJ_APP_SIGN_IDENTITY` 切换为正式开发者签名。审计辅助程序按目标架构单独编译，故不提供 universal 包。
+- **Windows**：从 macOS/Linux 交叉构建需要 `cargo install cargo-xwin`、`brew install llvm nsis`（脚本自动把 LLVM 加入 PATH）；在 Windows 宿主上则使用本机 MSVC 工具链，只需安装 NSIS（MSI/WiX 只能在 Windows 宿主生成；GitHub Actions 的 Windows 任务可直接产出 NSIS+MSI）。
+- **Linux**：Ubuntu 22.04 容器内编译（`scripts/docker/Dockerfile.linux`），依赖清单见 `tauri.conf.json` 的 `bundle.linux`。Docker 未运行时脚本会在 macOS 上自动拉起 Docker Desktop 并等待就绪。容器内默认 2 路并行编译防 VM 内存不足（`WJ_CARGO_JOBS=n` 调整）；增量产物损坏时 `WJ_CLEAN=1` 重跑。
+- **CI**：`.github/workflows/build.yml` 在 GitHub 官方运行器上构建全部平台（Windows 附加 MSI），推送 `v*` 标签或手动触发；各任务在 `npm run build` 前先构建对应三元组的 audit-pipe sidecar。
 
 
 ## GUI 使用
@@ -164,17 +166,23 @@ famtool --no-recursive --track-access /path/to/dir
 
 密钥使用系统随机源生成，Unix 目录权限 0700、密钥与配置文件 0600；Windows 使用用户目录继承权限。密钥保存在本机文件中，**不是系统钥匙串**。备份应在停止监控后复制整个 `.store` 目录及配置、对应密钥；丢失密钥无法恢复历史，程序不会生成新密钥覆盖既有加密库。
 
-## 原生系统审计（macOS）
+## 原生系统审计（macOS / Linux / Windows）
 
-已接入原生 Endpoint Security 通知辅助程序，自动与手动启用步骤见 [AUDIT.md](AUDIT.md)。设置页显示"等待辅助程序 / 已连接 / 权限不足 / 连接断开"等实际状态。macOS 13+ 支持"一键申请权限并启用"：系统管理员批准后台服务后，由 macOS 以 root 启动辅助程序；缺少完全磁盘访问时自动打开设置页。GUI 保持普通用户身份，不收集密码，不自动更改隐私授权。正式签名、公证及 Apple ES entitlement 是真实采集的前提。
+三大平台共用同一接收协议（GUI 普通用户运行，root/管理员辅助进程经系统授权通道推送事件，记录带"系统审计"标注与权威进程身份）。各平台采集通道与启用步骤见 [AUDIT.md](AUDIT.md)：
 
-系统审计记录单独标注，包含操作进程的可执行路径、PID/PID 版本、有效/真实/登录审计 UID、代码签名标识，以及可取得的父进程和责任进程信息。系统审计与 FSEvents 普通观察记录分别保存，不以时间邻近强行合并；未连接辅助程序或审计缺口中的操作不能补出真实身份。
+- **macOS**：Endpoint Security（需 Apple 授权签名）；旧系统可走 OpenBSM `/dev/auditpipe`（管理员密码，macOS 26 实测内核审计已停用，程序会如实报告不可用）。
+- **Linux**：`以管理员方式启动审计` 经 polkit 提权运行辅助程序，用内核 fanotify 文件系统级标记采集创建/删除/重命名/修改，进程归因取自内核记录的 `/proc/<pid>/exe`；不依赖 auditd，也不改动系统审计策略。
+- **Windows**：`以管理员方式启动审计` 经 UAC 提权运行辅助程序，自动开启对象访问审核、为监控根设置 SACL，并从安全日志订阅 4663/4660 事件，关联执行进程全路径、PID 与用户名；退出时恢复所改动的策略与 ACL。
+
+设置页显示"等待辅助程序 / 已连接 / 权限不足 / 连接断开"等实际状态。macOS 13+ 额外支持"一键申请权限并启用"托管服务。GUI 保持普通用户身份，不收集密码，不自动更改隐私授权。
+
+系统审计记录单独标注，包含操作进程的可执行路径、PID、UID（macOS 另含 PID 版本、代码签名标识与责任进程），以及可取得的父进程信息。系统审计与普通通知记录分别保存，不以时间邻近强行合并；未连接辅助程序或审计缺口中的操作不能补出真实身份。
 
 ## 操作应用与用户（GUI 进程/用户两列）
 
 每条记录含 `actor.process_id`、`actor.application`、`actor.user`、`actor.source` 与 `owner`。三大平台的文件通知都不随事件附带操作者身份（仅本进程自身事件附带 PID），因此按证据强度做三层尽力归因：
 
-1. **fd 扫描**（`fd_scan`）：事件发生时扫描全部进程打开的文件描述符（macOS libproc、Linux /proc），找到正持有该文件的进程。适合持续持有句柄的写入者；"写完即关"的进程无法捕获——这是无特权下的固有限制（完整审计需 macOS Endpoint Security（苹果授权）、Linux audit 或 Windows 安全审计）。
+1. **fd 扫描**（`fd_scan`）：事件发生时扫描全部进程打开的文件描述符（macOS libproc、Linux /proc），找到正持有该文件的进程。适合持续持有句柄的写入者；"写完即关"的进程无法捕获——这是无特权下的固有限制（确定身份请使用各平台的系统审计通道：macOS Endpoint Security（苹果授权）、Linux fanotify、Windows 安全日志，均需管理员授权）。
 2. **路径推断**（`path_inferred`）：按路径布局推断所属应用，如 `~/Library/Containers/<bundle>/…`、`~/Library/Application Support/<App>/…`、`~/.config/<App>/…`、`%APPDATA%\<App>\…`。
 3. **本进程自身事件**（`notify_process_id`）：系统原生报告。
 

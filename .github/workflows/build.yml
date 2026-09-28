@@ -40,6 +40,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
       - run: npm ci
+      # audit-pipe 是 Tauri externalBin sidecar,构建应用前必须先产出对应三元组
+      - run: cargo build -p famtool-cli --bin audit-pipe --release --target x86_64-pc-windows-msvc
+      - run: |
+          New-Item -ItemType Directory -Force crates/gui/binaries | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/audit-pipe.exe crates/gui/binaries/audit-pipe-x86_64-pc-windows-msvc.exe
       # Windows 宿主可直接产出 NSIS 与 MSI(WiX)两种安装程序
       - run: npm run build -- --bundles nsis,msi
       - uses: actions/upload-artifact@v4
@@ -59,6 +64,12 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+      # audit-pipe 是 Tauri externalBin sidecar,构建应用前必须先产出对应三元组
+      - run: cargo build -p famtool-cli --bin audit-pipe --release --target x86_64-unknown-linux-gnu
+      - run: |
+          mkdir -p crates/gui/binaries
+          cp target/x86_64-unknown-linux-gnu/release/audit-pipe crates/gui/binaries/audit-pipe-x86_64-unknown-linux-gnu
+          chmod 755 crates/gui/binaries/audit-pipe-x86_64-unknown-linux-gnu
       - run: npm run build -- --bundles deb,rpm
       - uses: actions/upload-artifact@v4
         with:
