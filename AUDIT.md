@@ -1,13 +1,47 @@
-# macOS 原生系统审计接入
+# 原生系统审计接入（macOS / Linux / Windows）
 
-本项目采用 **Endpoint Security 原生 NOTIFY 客户端**，不是解析 `ps`/`lsof` 的推断方案，也不依赖不稳定的 `eslogger` 输出。
+三平台共用一套 GUI 接收协议与加密入库链路，事件由 root/管理员辅助进程在操作系统内核层归因，不采用解析 `ps`/`lsof` 的推断方案。各平台采集通道：
+
+- **macOS**：Endpoint Security 原生 NOTIFY 客户端（需 Apple 授权）；旧系统另有 OpenBSM `/dev/auditpipe` 免授权通道（见下文，macOS 26 已失效）。
+- **Linux**：内核 fanotify（`crates/core/src/audit_fanotify.rs`），需 CAP_SYS_ADMIN，经 polkit 提权。
+- **Windows**：SACL + 安全日志 4663/4660 关联（`crates/core/src/audit_security_log.rs`），需管理员，经 UAC 提权。
 
 ## 当前状态与边界
 
-- 接入代码、原生辅助程序、GUI 接收通道、加密入库、历史查询、权限状态及测试均在项目内。
-- **代码编译成功不代表已获系统授权。** 开发环境通常没有有效的 Apple 代码签名身份，以普通用户运行辅助程序检查会返回 `not_privileged`；只有在获授权签名的环境下才能完成真实 ES 采集验证。
+- 接入代码、各平台辅助程序、GUI 接收通道、加密入库、历史查询、权限状态及测试均在项目内；fanotify/安全日志的解析器为纯函数并有跨平台单元测试，Linux/Windows 构建经容器与 cargo-xwin 验证。
+- **代码编译成功不代表已获系统授权。** 采集需真实的管理员授权（macOS 还需 Apple ES entitlement）；以普通用户运行辅助程序检查会返回 `not_privileged`。
 - Apple 要求 `com.apple.developer.endpoint-security.client` entitlement、适当签名、root 权限以及 TCC 完全磁盘访问许可。仅写入 entitlement plist 或临时签名不能取得 Apple 授权。
-- 目前只接入 macOS。Windows/Linux 继续普通文件通知与明确标记的推断，不宣称拥有系统审计身份。
+
+## 跨平台接收协议（三平台共用）
+
+- 传输：macOS/Linux 为 unix 套接字（`<日志位置>.store/audit.sock`，0600；对端凭据校验 root——macOS `getpeereid`、Linux `SO_PEERCRED`）；Windows 为随机命名管道（SDDL 仅当前用户/SYSTEM/管理员组可连，对端经 `GetNamedPipeClientProcessId` + `TokenElevation` 校验已提权）。
+- 协议：JSON 行 `Hello → Scope → Status → Event/Heartbeat`；单帧 ≤64KiB、10s 心跳超时、路径必须绝对、可执行文件必须绝对、`source` 标识白名单校验。GUI 与辅助进程双侧按监控范围过滤。
+- 事件 `audit.actor.source` 按通道标注：`endpoint_security` / `bsm_auditpipe` / `fanotify` / `security_log`；GUI 与历史详情的"归因来源"逐通道说明。
+- 接收端点经用户数据目录 `audit-endpoint.json`（0600，仅含 UID 与地址）发布，GUI 退出时清理，辅助程序据此自动退出。
+
+## Linux：fanotify 采集通道
+
+主界面 → 监控设置 → 系统审计 → **「以管理员方式启动审计」**，polkit（pkexec）弹出授权后以 root 启动 `audit-pipe`：
+
+- `fanotify_init(FAN_CLASS_NOTIF | FAN_NONBLOCK | FAN_REPORT_FID | FAN_REPORT_DIR_FID | FAN_REPORT_PIDFD)`；对每个监控根所在挂载点 `fanotify_mark(FAN_MARK_FILESYSTEM)`，内核随事件附带目录句柄+文件名(DFID_NAME)或目标句柄(FID)，绝对路径经 `open_by_handle_at` + `/proc/self/fd` 还原。
+- 事件覆盖：创建（`FAN_CREATE`）、删除（`FAN_DELETE`）、重命名（`FAN_RENAME`，旧名/新名成对还原）、修改（`FAN_MODIFY`）、访问（开启"记录文件访问事件"后 `FAN_ACCESS`）。
+- 归因：`/proc/<pid>/exe`（内核记录的权威执行路径）、euid/ruid/loginuid、ppid；进程已退出无法解析执行文件时该条不推送（协议要求可验证身份）。
+- 边界：需要较新内核（fanotify FID 报告模式，≥5.1）；不依赖 auditd、不改动系统审计策略、随 GUI 退出自动结束；网络文件系统依 fanotify 支持情况而定。
+
+调试：`sudo target/release/audit-pipe --socket <audit.sock 路径>`；`audit-pipe --check` 以当前身份探测通道能力。
+
+## Windows：SACL + 安全日志采集通道
+
+主界面 → 监控设置 → 系统审计 → **「以管理员方式启动审计」**，UAC 提权启动 `audit-pipe.exe`，辅助程序自动完成：
+
+1. `auditpol` 开启"对象访问审核 – 文件系统"成功审核（记录原状态，退出时恢复）。
+2. 对每个监控根经 PowerShell 向 SACL 追加 Everyone 的 `Write,Delete,DeleteSubdirectoriesAndFiles` 成功审核 ACE（继承容器与对象；退出时精确移除自建项）。
+3. `wevtapi EvtSubscribe` 订阅 Security 日志 4663/4660：4663 携带 `ObjectName`/`ProcessName`/`ProcessID`/`SubjectUserName`/`AccessMask`；写入类访问记为 **修改**；带 DELETE 意向的 4663 按 `HandleID` 挂起，收到对应 4660（句柄以删除关闭）才记为 **删除**，5 秒无确认即丢弃（删除尝试可能未成功）。NT 设备路径（`\Device\HarddiskVolumeN`）自动翻译为盘符路径。
+4. 退出时恢复审核策略并移除 SACL。若辅助程序被强行终止，可用 `audit-pipe --teardown` 手动清理监控根的 SACL。
+
+边界：`created` 与 `modified` 在本通道统一记为"修改"（创建仍由普通监控通知准确记录）；重命名依赖普通通道；读取事件不产生本通道审核项；高写入量目录下安全日志会增长（范围已限定在监控根）。
+
+调试：`audit-pipe.exe --check`（探测提权与 Security 日志订阅能力）。
 
 ## 管理员密码方式开启审计（OpenBSM 管道）——macOS 26 实测已不可用
 

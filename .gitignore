@@ -13,3 +13,5 @@ crates/gui/gen/
 
 crates/gui/resources/famtool-audit
 .DS_Store
+
+crates/gui/binaries/

@@ -90,12 +90,23 @@ build_macos() {
         export APPLE_SIGNING_IDENTITY="$WJ_APP_SIGN_IDENTITY"
         export WJ_AUDIT_SIGN_IDENTITY="${WJ_AUDIT_SIGN_IDENTITY:-$WJ_APP_SIGN_IDENTITY}"
     fi
+    # 自定义更新服务器地址(通过 --config 覆盖内置占位地址)
+    local CONFIG_ARGS=()
+    if [ -n "${WJ_UPDATE_ENDPOINT:-}" ]; then
+        # 本地/局域网 http 联调需显式放行非加密传输;正式发布应使用 https
+        case "$WJ_UPDATE_ENDPOINT" in
+            http://*) printf '{"plugins":{"updater":{"endpoints":["%s"],"dangerousInsecureTransportProtocol":true}}}' "$WJ_UPDATE_ENDPOINT" ;;
+            *)        printf '{"plugins":{"updater":{"endpoints":["%s"]}}}' "$WJ_UPDATE_ENDPOINT" ;;
+        esac > "$ROOT/target/update-endpoint.json"
+        CONFIG_ARGS=(--config "$ROOT/target/update-endpoint.json")
+    fi
     # 审计辅助程序 sidecar(tauri externalBin:binaries/audit-pipe-<triple>)
     cargo build -p famtool-cli --bin audit-pipe --release ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"}
     local TRIPLE
     TRIPLE="${TARGET:-$(rustc -vV | sed -n 's/^host: //p')}"
     build_sidecar "$TRIPLE" "$ARCH_DIR"
-    npm run build -- ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"} --bundles app
+    npm run build -- ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"} ${CONFIG_ARGS[@]+"${CONFIG_ARGS[@]}"} --bundles app
+
 
     # tauri 已把 sidecar 打进应用包,这里只做组装与签名
     local SOURCE="$ROOT/$ARCH_DIR/bundle/macos/FAMTool.app"
@@ -169,6 +180,7 @@ build_windows() {
         -exec cp -v {} dist/ \;
     [ -n "$(find dist -maxdepth 1 -name 'FAMTool_*_x64-setup.exe' -print -quit)" ] \
         || die "Windows NSIS 安装程序未生成"
+
     log "Windows NSIS 安装程序已复制到 dist/"
 }
 
@@ -216,6 +228,7 @@ build_linux() {
     UID_GID="$(id -u):$(id -g)"
     TRIPLE="${ARCH_TAG}-unknown-linux-gnu"
     log "在容器内构建 Linux $ARCH_TAG 安装包 (deb,rpm)..."
+    # 注意:不能放在 $() 里调用,那会在子 shell 中 export,密钥传不进 docker
     docker run --rm --platform "$PLATFORM" \
         -v "$ROOT":/work -w /work \
         -e CARGO_TARGET_DIR=/work/target-linux \
@@ -264,6 +277,7 @@ build_linux() {
     fi
     compgen -G "$deb_glob" >/dev/null || die "Linux $ARCH_TAG:dist/ 中未找到 deb($deb_glob)"
     compgen -G "$rpm_glob" >/dev/null || die "Linux $ARCH_TAG:dist/ 中未找到 rpm($rpm_glob)"
+
     log "Linux $ARCH_TAG 安装包已就绪"
 }
 
@@ -323,3 +337,9 @@ gen_checksums
 echo ""
 echo "=== dist/ 产物清单(版本 $(conf_version)) ==="
 ls -la dist/
+if compgen -G "dist/FAMTool*" >/dev/null; then
+    echo ""
+    echo "=== 发布到 GitHub(一键复制) ==="
+    # shellcheck disable=SC2046
+    echo "gh release create v$(conf_version) $(ls dist/*.dmg dist/*.exe dist/*.deb dist/*.rpm 2>/dev/null | tr '\n' ' ')-t v$(conf_version) -n 'FAMTool $(conf_version)'"
+fi

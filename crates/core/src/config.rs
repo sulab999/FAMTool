@@ -33,7 +33,11 @@ impl Default for Config {
             track_access: false,
             recursive: true,
             retention_days: 30,
-            audit_enabled: cfg!(target_os = "macos"),
+            audit_enabled: cfg!(any(
+                target_os = "macos",
+                target_os = "linux",
+                target_os = "windows"
+            )),
         }
     }
 }

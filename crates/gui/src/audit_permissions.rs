@@ -45,9 +45,17 @@ pub async fn operation(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (app, operation);
+        #[cfg(target_os = "linux")]
+        let message = "macOS 托管审计服务不适用于 Linux:请点击「以管理员方式启动审计」,\
+            通过 polkit 授权运行 fanotify 采集辅助程序";
+        #[cfg(target_os = "windows")]
+        let message = "macOS 托管审计服务不适用于 Windows:请点击「以管理员方式启动审计」,\
+            通过 UAC 提权运行安全日志采集辅助程序";
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        let message = "自动系统审计授权仅支持 macOS 13 及以上版本";
         Ok(PermissionReply {
             state: "unsupported".into(),
-            message: "自动系统审计授权仅支持 macOS 13 及以上版本".into(),
+            message: message.into(),
             helper_path: None,
         })
     }
@@ -60,22 +68,23 @@ struct Endpoint {
 }
 
 pub fn publish_endpoint(socket: &Path) -> Result<PathBuf, String> {
-    #[cfg(target_os = "macos")]
-    {
-        let path = famtool_core::config::data_dir().join("audit-endpoint.json");
-        write_endpoint(&path, socket, unsafe { libc::geteuid() })?;
-        Ok(path)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = socket;
-        Err("当前系统不支持托管审计服务".into())
-    }
+    let path = famtool_core::config::data_dir().join("audit-endpoint.json");
+    #[cfg(unix)]
+    let uid = unsafe { libc::geteuid() };
+    // Windows 无 uid 概念;管道信任由服务端 ACL + 对端提权校验保证
+    #[cfg(not(unix))]
+    let uid = u32::MAX;
+    write_endpoint(&path, socket, uid)?;
+    Ok(path)
 }
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(unix, windows, test))]
 fn write_endpoint(path: &Path, socket: &Path, uid: u32) -> Result<(), String> {
-    if uid == 0 || !socket.is_absolute() {
-        return Err("主界面必须以普通用户运行，并提供绝对套接字路径".into());
+    #[cfg(unix)]
+    if uid == 0 {
+        return Err("主界面必须以普通用户运行,才能发布审计连接位置".into());
+    }
+    if !socket.is_absolute() {
+        return Err("审计连接位置必须为绝对路径".into());
     }
     let parent = path.parent().ok_or("无效连接位置")?;
     famtool_core::crypto::private_dir(parent).map_err(|e| e.to_string())?;

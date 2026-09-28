@@ -1,4 +1,4 @@
-import { events, escapeHTML as esc, splitPath, matches, identitySource, settingPaths, dateParts, pageNumber, pageSummary, shouldAskAuditPermission, shouldOpenAuditPrivacy } from './format.js';
+import { events, escapeHTML as esc, splitPath, matches, identitySource, settingPaths, dateParts, pageNumber, pageSummary, shouldAskAuditPermission, shouldOpenAuditPrivacy, errorKey, shouldShowErrorBanner } from './format.js';
 const $ = id => document.getElementById(id);
 const invoke = (command, args = {}) => {
   if (!window.__TAURI__) return Promise.reject(new Error('请通过 Tauri 桌面应用打开此界面。'));
@@ -8,6 +8,8 @@ let snapshot = null, view = 'live', busy = false, refreshing = false, settingsDi
 let history = { rows: [], total: null, totalPages: 0, page: 0, pageSize: 200, scanned: 0, requestId: null, searching: false, loadingPage: false, generation: 0 };
 let toastTimer;
 function toast(message, failure = false) { $('toast').textContent = String(message); $('toast').classList.toggle('failure', failure); $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 5500); }
+$('toast').onclick = () => { clearTimeout(toastTimer); $('toast').hidden = true; };
+let errorDismissedKey = '';
 function setBusy(value) { busy = value; $('toggle-monitor').disabled = value || !snapshot?.writable; $('save-settings').disabled = value || !snapshot?.writable; $('delete-button').disabled = value || !snapshot?.writable; $('confirm-delete').disabled = value; $('cancel-delete').disabled = value; }
 async function operation(work, message) { if (busy) return; setBusy(true); try { await work(); if (message) toast(message); } catch (error) { toast(error, true); } finally { setBusy(false); await refresh(); } }
 const titles = { live: ['实时活动', 'LIVE ACTIVITY', '文件的每一次变化，都有迹可循。'], history: ['历史搜索', 'HISTORY SEARCH', '按时间和线索，找到你需要的记录。'], settings: ['监控设置', 'PREFERENCES', '设定监控范围，让记录更有用。'] };
@@ -16,6 +18,22 @@ function populateEvents(element) { element.innerHTML = '<option value="">全部�
 populateEvents($('live-event')); populateEvents($('history-event'));
 let auditPermissionBusy = false, auditPromptSeen = false, auditRequested = false, auditPrivacyOpened = false, auditServicePolling = false, auditWatchUntil = 0, auditBannerDismissed = false;
 const auditPromptKey = 'audit-permission-prompt-v1';
+const uaPlatform = navigator.userAgent;
+const isMac = /Macintosh|Mac OS X/.test(uaPlatform), isWindows = /Windows NT/.test(uaPlatform);
+function applyAuditPlatformUi() {
+ $('audit-note-es').hidden = !isMac; $('audit-note-pipe').hidden = !isMac;
+ $('audit-note-linux').hidden = isMac || isWindows; $('audit-note-windows').hidden = !isWindows;
+ for (const id of ['audit-enable', 'audit-privacy', 'audit-service-stop']) $(id).style.display = isMac ? '' : 'none';
+ if (!isMac) {
+  $('audit-dialog-intro').innerHTML = '系统审计可以记录实际执行删除等操作的进程与用户。审计辅助程序需要以 <strong>管理员</strong> 权限运行，主界面保持普通用户权限。';
+  $('audit-dialog-steps').innerHTML = isWindows
+   ? '<li>通过 UAC 提权启动审计辅助程序。</li><li>辅助程序开启对象访问审核并为监控目录设置 SACL。</li><li>从安全日志（4663/4660）关联执行进程与用户。</li>'
+   : '<li>通过 polkit 输入管理员密码启动辅助程序。</li><li>辅助程序以内核 fanotify 采集文件系统事件。</li><li>进程归因取自内核记录的 /proc/&lt;pid&gt;/exe。</li>';
+  $('audit-dialog-foot').textContent = '管理员验证由操作系统完成，本程序不接收或保存密码。';
+  $('audit-permission-confirm').textContent = '以管理员方式启动';
+ }
+}
+applyAuditPlatformUi();
 function auditDismissed() { try { return localStorage.getItem(auditPromptKey) === 'dismissed'; } catch { return false; } }
 function rememberAuditPrompt() { try { localStorage.setItem(auditPromptKey, 'dismissed'); } catch {} auditPromptSeen = true; }
 function openAuditPrompt() {
@@ -33,8 +51,19 @@ async function requestAuditEnable() {
  auditPermissionBusy = true;
  $('audit-permission-confirm').disabled = true;
  $('audit-permission-later').disabled = true;
- $('audit-dialog-result').textContent = '正在检查签名及系统授权条件…';
+ $('audit-dialog-result').textContent = isMac ? '正在检查签名及系统授权条件…' : '正在请求管理员授权…';
  try {
+   if (!isMac) {
+     await invoke('audit_pipe_launch');
+     showAuditPermissionResult({ message: '审计辅助程序已请求管理员授权，数秒后状态应变为“系统审计已连接”。' });
+     rememberAuditPrompt();
+     auditRequested = true;
+     auditWatchUntil = Date.now() + 120000;
+     $('audit-permission-dialog').close();
+     $('setting-audit').checked = true;
+     await refresh();
+     return;
+   }
    const result = await invoke('audit_enable');
    showAuditPermissionResult(result);
    rememberAuditPrompt();
@@ -51,10 +80,89 @@ async function openAuditPrivacy() {
 }
 $('audit-enable').onclick = openAuditPrompt;
 $('audit-banner-close').onclick = () => { auditBannerDismissed = true; $('audit-banner').hidden = true; };
+
+// ---- 软件更新 ----
+invoke('plugin:app|version').then(v => { $('update-current').textContent = v; }).catch(() => {});
+let updateBusy = false, updateInfo = null, downloadedPath = null;
+async function checkUpdate(manual) {
+  if (updateBusy) return;
+  updateBusy = true;
+  $('update-check').disabled = true;
+  $('update-status').textContent = '正在检查更新…';
+  try {
+    const update = await invoke('update_check');
+    if (!update) {
+      $('update-status').textContent = '已是最新版本。';
+      if (manual) toast('已是最新版本。');
+      return;
+    }
+    showUpdateDialog(update);
+  } catch (error) {
+    $('update-status').textContent = `检查更新失败：${error}`;
+    if (manual) toast(`检查更新失败：${error}`, true);
+  } finally {
+    updateBusy = false;
+    $('update-check').disabled = false;
+  }
+}
+function showUpdateDialog(update) {
+  updateInfo = update;
+  downloadedPath = null;
+  $('update-current').textContent = update.currentVersion;
+  $('update-dialog-body').textContent = `新版本 v${update.version}(当前 v${update.currentVersion})${update.body ? '：' + update.body : ''}\n安装包：${update.assetName}`;
+  $('update-progress').hidden = true;
+  $('update-confirm').textContent = '下载并安装';
+  $('update-confirm').disabled = false;
+  if (!$('update-dialog').open) $('update-dialog').showModal();
+}
+$('update-check').onclick = () => checkUpdate(true);
+$('update-later').onclick = () => $('update-dialog').close();
+$('update-dialog').addEventListener('cancel', event => { if (updateBusy) event.preventDefault(); });
+$('update-confirm').onclick = async () => {
+  if (updateBusy || !updateInfo) return;
+  updateBusy = true;
+  $('update-confirm').disabled = true;
+  $('update-progress').hidden = false;
+  try {
+    if (!downloadedPath) {
+      $('update-progress').textContent = `正在下载 ${updateInfo.assetName}…`;
+      downloadedPath = await invoke('update_download', { url: updateInfo.assetUrl, filename: updateInfo.assetName });
+      $('update-dialog-body').textContent = `已下载到：${downloadedPath}\n是否立即打开安装程序？安装完成后可重新启动 FAMTool。`;
+      $('update-progress').textContent = '';
+      $('update-confirm').textContent = '立即安装';
+      $('update-confirm').disabled = false;
+      updateBusy = false;
+      return;
+    }
+    $('update-progress').textContent = '正在打开安装程序…';
+    await invoke('update_open', { path: downloadedPath });
+    $('update-progress').textContent = '安装程序已打开,请按系统提示完成安装。';
+    toast('安装程序已打开,请按系统提示完成安装。');
+  } catch (error) {
+    $('update-progress').textContent = `操作失败：${error}`;
+    toast(`操作失败：${error}`, true);
+  } finally {
+    updateBusy = false;
+    if (downloadedPath) $('update-confirm').disabled = false;
+  }
+};
+// 每日 10:30 定时检测由后台调度线程发起;窗口隐藏时会被自动带回前台
+if (window.__TAURI__?.event) {
+  window.__TAURI__.event.listen('update-available', event => showUpdateDialog(event.payload)).catch(() => {});
+}
+// 启动 24 小时一次的自动检查(手动按钮不受限)
+try {
+  const last = Number(localStorage.getItem('famtool-update-check') || 0);
+  if (Date.now() - last > 24 * 3600 * 1000) {
+    localStorage.setItem('famtool-update-check', String(Date.now()));
+    checkUpdate(false);
+  }
+} catch {}
+$('error-banner-close').onclick = () => { errorDismissedKey = errorKey(snapshot?.errors?.at(-1)); $('error-banner').hidden = true; };
 $('audit-pipe-start').onclick = () => operation(async () => {
-  const r = await invoke('audit_pipe_launch');
-  $('audit-permission-result').textContent = `审计辅助程序已以管理员启动。数秒后审计状态应显示“系统审计已连接”`;
-}, 'OpenBSM 审计辅助程序已启动。');
+  await invoke('audit_pipe_launch');
+  $('audit-permission-result').textContent = `审计辅助程序已请求管理员授权。数秒后审计状态应显示“系统审计已连接”`;
+}, '审计辅助程序已以管理员方式启动。');
 
 $('audit-permission-confirm').onclick = requestAuditEnable;
 $('audit-permission-later').onclick = () => { rememberAuditPrompt(); $('audit-permission-dialog').close(); };
@@ -73,7 +181,7 @@ setInterval(async () => {
 function renderAudit() {
  const a = snapshot.audit;
  if (!a) return;
- const labels = {running:'系统审计已连接',waiting:'等待审计辅助程序',connecting:'正在连接',disabled:'系统审计未启用',paused:'审计已暂停',unavailable:'系统审计不可用',disconnected:'审计连接断开',not_entitled:'缺少 Apple 审计授权',not_permitted:'缺少完全磁盘访问权限',not_privileged:'辅助程序需要 root',failed:'审计启动失败'};
+ const labels = {running:'系统审计已连接',waiting:'等待审计辅助程序',connecting:'正在连接',disabled:'系统审计未启用',paused:'审计已暂停',unavailable:'系统审计不可用',disconnected:'审计连接断开',not_entitled:'缺少 Apple 审计授权',not_permitted:'缺少完全磁盘访问权限',not_privileged:'辅助程序需要管理员权限',failed:'审计启动失败'};
  const title = labels[a.state] || a.state;
  $('audit-state').textContent = title;
  $('audit-status').textContent = `${a.message} · 已接收 ${a.received.toLocaleString()} 条系统审计记录`;
@@ -85,7 +193,7 @@ function renderAudit() {
  $('audit-service-stop').disabled = !a.supported || !snapshot.writable || auditPermissionBusy;
  if (shouldAskAuditPermission(a, auditPromptSeen || auditDismissed(), busy) && snapshot.writable) openAuditPrompt();
  if (shouldOpenAuditPrivacy(a, auditRequested, auditPrivacyOpened)) { auditPrivacyOpened = true; openAuditPrivacy(); }
- if (a.state === 'running') { auditRequested = false; $('audit-permission-result').textContent = '系统审计已实际连接，辅助程序正以 root 接收事件。'; }
+ if (a.state === 'running') { auditRequested = false; $('audit-permission-result').textContent = '系统审计已实际连接，辅助程序正以管理员权限接收事件。'; }
  if (a.state === 'running') auditBannerDismissed = false; // 真正连上时重新提示
  $('audit-banner').hidden = !a.enabled || auditBannerDismissed;
  $('audit-banner').classList.toggle('audit-ready', a.state === 'running');
@@ -100,12 +208,12 @@ $('audit-probe').onclick = async () => {
 function recordRow(r, index) { const { time, date } = dateParts(r.time); const { name, parent } = splitPath(r.path); const known = events[r.event] ? r.event : 'diagnostic'; const title = r.diagnostic ? `${r.diagnostic.code} · ${r.diagnostic.count} 次` : name; const sub = r.diagnostic?.message || parent; const user = r.actor?.user || r.owner || '—'; return `<tr tabindex="0" data-index="${index}" aria-label="查看 ${esc(title)}"><td><div class="time-text">${esc(time)}</div><div class="date-text">${esc(date)}</div></td><td><span class="pill event-${known}">${esc(events[r.event] || r.event)}</span>${r.audit ? '<span class="audit-tag">系统审计</span>' : ''}</td><td title="${esc(r.path)}"><div class="file-main">${esc(title || '—')}</div><div class="file-parent">${esc(sub)}</div></td><td class="cell-ellipsis" title="${esc(identitySource(r.actor?.source))}">${esc(r.actor?.application || '—')}</td><td class="cell-ellipsis" title="${esc(r.actor?.user ? '进程用户' : r.owner ? '文件属主，并非操作者' : '系统未提供')}">${esc(user)}</td><td class="chevron">›</td></tr>`; }
 function renderLive() { if (!snapshot || view !== 'live') return; if ($('live-follow').checked) liveRows = snapshot.records.map(item => item.record); const rows = liveRows.filter(r => matches(r, $('live-text').value, $('live-event').value)); $('live-rows').innerHTML = rows.map(recordRow).join(''); $('live-rows')._records = rows; $('live-count').textContent = `${rows.length} 条`; $('live-empty').hidden = rows.length !== 0; $('live-summary').textContent = `显示 ${rows.length} 条 · 缓冲共 ${snapshot.buffered.toLocaleString()} 条`; }
 function fillSettings() { if (!snapshot) return; const c = snapshot.config; $('setting-roots').value = c.roots.join('\n'); $('setting-excludes').value = c.excludes.join('\n'); $('setting-log').value = c.log_file; $('setting-retention').value = c.retention_days; $('setting-debounce').value = c.debounce_ms; $('setting-recursive').checked = c.recursive; $('setting-access').checked = c.track_access; $('setting-audit').checked = c.audit_enabled; $('setting-audit').disabled = !snapshot.audit?.supported; }
-async function refresh() { if (refreshing) return; refreshing = true; try { snapshot = await invoke('snapshot'); $('connection').textContent = snapshot.running ? '监控运行中' : '监控已暂停'; $('connection').classList.toggle('running', snapshot.running); $('toggle-monitor').textContent = snapshot.running ? 'Ⅱ 暂停监控' : '▷ 开始监控'; setBusy(busy); renderAudit(); $('stat-received').textContent = snapshot.received.toLocaleString(); $('stat-buffered').textContent = snapshot.buffered.toLocaleString(); $('stat-retention').textContent = snapshot.config.retention_days; const error = snapshot.errors.at(-1); $('error-banner').hidden = !error; $('error-banner').textContent = error || ''; if (!settingsDirty) fillSettings(); if (!detailRecord && document.activeElement?.closest('tbody') === null) renderLive(); } catch (error) { $('connection').textContent = '连接异常'; $('connection').classList.remove('running'); $('error-banner').hidden = false; $('error-banner').textContent = String(error); } finally { refreshing = false; } }
+async function refresh() { if (refreshing) return; refreshing = true; try { snapshot = await invoke('snapshot'); $('connection').textContent = snapshot.running ? '监控运行中' : '监控已暂停'; $('connection').classList.toggle('running', snapshot.running); $('toggle-monitor').textContent = snapshot.running ? 'Ⅱ 暂停监控' : '▷ 开始监控'; setBusy(busy); renderAudit(); $('stat-received').textContent = snapshot.received.toLocaleString(); $('stat-buffered').textContent = snapshot.buffered.toLocaleString(); $('stat-retention').textContent = snapshot.config.retention_days; const error = snapshot.errors.at(-1); $('error-banner-text').textContent = error || ''; $('error-banner').hidden = !shouldShowErrorBanner(error, errorDismissedKey); if (!settingsDirty) fillSettings(); if (!detailRecord && document.activeElement?.closest('tbody') === null) renderLive(); } catch (error) { $('connection').textContent = '连接异常'; $('connection').classList.remove('running'); errorDismissedKey = ''; $('error-banner-text').textContent = String(error); $('error-banner').hidden = false; } finally { refreshing = false; } }
 function showDetail(r) { detailRecord = r; const fields = [['时间', new Date(r.time).toLocaleString('zh-CN', { hour12: false })], ['操作', events[r.event] || r.event], ['对象', ({ file: '文件', folder: '文件夹', monitor: '监控诊断' })[r.object] || r.object], ['文件路径', r.path], ...(r.from ? [['原路径', r.from]] : []), ['关联应用', r.actor?.application || '未知'], ['进程 ID', r.actor?.process_id ?? '未知'], ['进程用户', r.actor?.user || '未知'], ['文件属主', r.owner || '未知'], ['归因来源', identitySource(r.actor?.source)]]; if (r.audit) {
  const a = r.audit;
  const ref = p => p ? `${p.executable || '路径未知（进程可能已退出）'} · PID ${p.pid}` : '系统未提供';
  fields.push(['执行文件', a.executable], ['有效 UID', a.uid], ['真实 UID', a.real_uid], ['审计登录 UID', a.audit_uid], ['进程版本', a.pid_version], ['父进程', ref(a.parent)], ['责任进程', ref(a.responsible)], ['签名标识', a.signing_id || '未提供'], ['签名团队', a.team_id || '未提供'], ['系统审计序号', a.global_sequence]);
- } if (r.diagnostic) fields.push(['诊断代码', r.diagnostic.code], ['累计次数', r.diagnostic.count], ['首次发生', new Date(r.diagnostic.first_time).toLocaleString()], ['末次发生', new Date(r.diagnostic.last_time).toLocaleString()], ['诊断说明', r.diagnostic.message]); $('detail-content').innerHTML = `<span class="pill event-${events[r.event] ? r.event : 'diagnostic'}">${esc(events[r.event] || r.event)}</span><dl class="detail-list">${fields.map(([key, value]) => `<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join('')}</dl><div class="detail-note">${r.audit ? '执行进程来自 Endpoint Security 事件。父进程/责任进程路径通过审计令牌查询，退出后可能未知；责任进程不一定是直接父进程。' : '关联应用、进程用户及文件属主是不同信息。句柄关联与路径推断不代表确定的操作者。'}</div>`; $('reveal-file').hidden = Boolean(r.diagnostic) || !r.path; $('detail-dialog').showModal(); }
+ } if (r.diagnostic) fields.push(['诊断代码', r.diagnostic.code], ['累计次数', r.diagnostic.count], ['首次发生', new Date(r.diagnostic.first_time).toLocaleString()], ['末次发生', new Date(r.diagnostic.last_time).toLocaleString()], ['诊断说明', r.diagnostic.message]); $('detail-content').innerHTML = `<span class="pill event-${events[r.event] ? r.event : 'diagnostic'}">${esc(events[r.event] || r.event)}</span><dl class="detail-list">${fields.map(([key, value]) => `<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join('')}</dl><div class="detail-note">${r.audit ? '执行进程由操作系统原生审计通道在事件发生时记录。父进程/责任进程路径在事件后查询，进程退出后可能未知；责任进程不一定是直接父进程。' : '关联应用、进程用户及文件属主是不同信息。句柄关联与路径推断不代表确定的操作者。'}</div>`; $('reveal-file').hidden = Boolean(r.diagnostic) || !r.path; $('detail-dialog').showModal(); }
 for (const id of ['live-rows', 'history-rows']) { $(id).addEventListener('click', event => { const row = event.target.closest('tr'); if (row) showDetail($(id)._records[Number(row.dataset.index)]); }); $(id).addEventListener('keydown', event => { if (event.key === 'Enter') { const row = event.target.closest('tr'); if (row) showDetail($(id)._records[Number(row.dataset.index)]); } }); }
 $('close-detail').onclick = () => $('detail-dialog').close(); $('detail-dialog').addEventListener('close', () => { detailRecord = null; });
 $('reveal-file').onclick = () => invoke('reveal_file', { path: detailRecord.path }).catch(e => toast(e, true));

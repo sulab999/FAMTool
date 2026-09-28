@@ -25,6 +25,9 @@ test('pagination summaries handle no matches, exact pages and final partial page
 test('system audit identities are distinguished and parent apps can be searched',()=>{
   assert(identitySource('endpoint_security').includes('系统审计'));
   assert(!identitySource('endpoint_security').includes('推断'));
+  assert(identitySource('bsm_auditpipe').includes('系统审计'));
+  assert(identitySource('fanotify').includes('系统审计'));
+  assert(identitySource('security_log').includes('系统审计'));
   const r={event:'removed',path:'/watched/授权书_副本.png',actor:{application:'rm'},audit:{executable:'/bin/rm',parent:{executable:'/bin/zsh'},responsible:{executable:'/Applications/Terminal.app/Contents/MacOS/Terminal'}}};
   assert(matches(r,'Terminal','removed'));assert(matches(r,'/bin/rm',''));assert(matches(r,'zsh',''));
 });
@@ -43,4 +46,14 @@ test('privacy settings auto-open once only after a user authorization request',(
   assert(!shouldOpenAuditPrivacy({state:'not_permitted'},false,false));
   assert(!shouldOpenAuditPrivacy({state:'not_permitted'},true,true));
   assert(!shouldOpenAuditPrivacy({state:'not_entitled'},true,false));
+});
+
+import { errorKey, shouldShowErrorBanner } from '../crates/gui/ui/format.js';
+test('run-time banners are dismissible per cause, reappearing only for new causes',()=>{
+  const audit='原生系统审计不可用或连接异常，普通文件监控继续运行。（3 次，已保存至历史诊断）';
+  assert.equal(errorKey(audit),'原生系统审计不可用或连接异常，普通文件监控继续运行。');
+  assert(shouldShowErrorBanner(audit,''));                       // 首次出现必须展示
+  assert(!shouldShowErrorBanner(audit,'原生系统审计不可用或连接异常，普通文件监控继续运行。')); // 关闭后同因计数不再弹出
+  assert(shouldShowErrorBanner('监控引擎写入失败。','原生系统审计不可用或连接异常，普通文件监控继续运行。')); // 新原因重新弹出
+  assert(!shouldShowErrorBanner('', 'x'));                       // 无错误不展示
 });

@@ -48,5 +48,21 @@ fn main() {
             std::fs::copy(temporary, destination).unwrap();
         }
     }
+    // externalBin(tauri.conf bundle):打包要求 binaries/audit-pipe-<triple>[.exe]
+    // 存在。发布路径由 package.sh 先构建真实辅助程序放入;本机开发构建用占位
+    // 文件保证可编译,GUI 运行时只在完整应用包中查找真正的可执行文件。
+    let triple = std::env::var("TARGET").unwrap_or_default();
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let exe = if target_os == "windows" { ".exe" } else { "" };
+    let sidecar = std::path::Path::new("binaries").join(format!("audit-pipe-{triple}{exe}"));
+    if !sidecar.exists() {
+        std::fs::create_dir_all("binaries").ok();
+        std::fs::write(
+            &sidecar,
+            b"# FAMTool audit-pipe placeholder (package.sh replaces it with the real binary)\n",
+        )
+        .ok();
+    }
+    println!("cargo:rerun-if-changed=binaries");
     tauri_build::build()
 }

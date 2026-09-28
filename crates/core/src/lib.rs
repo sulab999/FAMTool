@@ -20,6 +20,11 @@ pub mod diagnostics;
 pub mod search;
 
 pub mod audit;
-// audit-pipe 依赖 macOS /dev/auditpipe 与 OpenBSM,仅 macOS 可用。
-#[cfg(target_os = "macos")]
+/// 审计辅助进程库:共享协议/传输 + 平台采集通道
 pub mod audit_pipe;
+/// Linux fanotify 采集通道(纯解析函数跨平台可测,运行时仅 Linux)
+#[cfg(any(target_os = "linux", test))]
+pub mod audit_fanotify;
+/// Windows 安全日志采集通道(纯解析函数跨平台可测,运行时仅 Windows)
+#[cfg(any(target_os = "windows", test))]
+pub mod audit_security_log;
