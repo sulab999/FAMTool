@@ -28,3 +28,6 @@ export function errorKey(text) { return String(text ?? '').split('（')[0].trim(
 export function shouldShowErrorBanner(error, dismissedKey) {
   return Boolean(error) && errorKey(error) !== dismissedKey;
 }
+export function auditBannerDismissal(dismissed, previousState, currentState) {
+  return currentState === 'running' && previousState !== 'running' ? false : dismissed;
+}

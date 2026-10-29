@@ -9,6 +9,7 @@
 //!   - 同批内"源路径消失 + 目标路径出现"配对成一条重命名(带原路径);
 //!   - 同批内 Create+Modify 并存时,用文件出生时间区分是新建还是编辑。
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
@@ -126,10 +127,13 @@ impl Batch {
     }
 
     fn entry(&mut self, path: PathBuf) -> &mut PathState {
-        if !self.paths.contains_key(&path) {
-            self.order.push(path.clone());
+        match self.paths.entry(path) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                self.order.push(entry.key().clone());
+                entry.insert(PathState::default())
+            }
         }
-        self.paths.entry(path).or_default()
     }
 
     fn ingest(&mut self, ev: Event) {
@@ -384,6 +388,20 @@ fn stat_object(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn entry_preserves_first_seen_order_and_state() {
+        let mut batch = Batch::new(Duration::from_secs(1));
+        let first = PathBuf::from("first");
+        let second = PathBuf::from("second");
+        batch.entry(first.clone()).data = true;
+        batch.entry(second.clone()).access = true;
+        batch.entry(first.clone()).access = true;
+
+        assert_eq!(batch.order, vec![first.clone(), second]);
+        assert!(batch.paths[&first].data);
+        assert!(batch.paths[&first].access);
+    }
+
     #[test]
     fn shutdown_flushes_pending_batch() {
         let tmp = tempfile::tempdir().unwrap();

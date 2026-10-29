@@ -1,4 +1,4 @@
-import { events, escapeHTML as esc, splitPath, matches, identitySource, settingPaths, dateParts, pageNumber, pageSummary, shouldAskAuditPermission, shouldOpenAuditPrivacy, errorKey, shouldShowErrorBanner } from './format.js';
+import { events, escapeHTML as esc, splitPath, matches, identitySource, settingPaths, dateParts, pageNumber, pageSummary, shouldAskAuditPermission, shouldOpenAuditPrivacy, errorKey, shouldShowErrorBanner, auditBannerDismissal } from './format.js';
 const $ = id => document.getElementById(id);
 const invoke = (command, args = {}) => {
   if (!window.__TAURI__) return Promise.reject(new Error('请通过 Tauri 桌面应用打开此界面。'));
@@ -16,7 +16,7 @@ const titles = { live: ['实时活动', 'LIVE ACTIVITY', '文件的每一次变�
 function navigate(next) { view = next; for (const name of Object.keys(titles)) $(`view-${name}`).hidden = name !== next; document.querySelectorAll('[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === next)); const [title, eyebrow, description] = titles[next]; $('page-title').textContent = title; $('breadcrumb-current').textContent = title; $('eyebrow').textContent = eyebrow; $('page-description').textContent = description; if (next === 'live') renderLive(); }
 function populateEvents(element) { element.innerHTML = '<option value="">全部事件</option>' + Object.entries(events).map(([value, label]) => `<option value="${value}">${label}</option>`).join(''); }
 populateEvents($('live-event')); populateEvents($('history-event'));
-let auditPermissionBusy = false, auditPromptSeen = false, auditRequested = false, auditPrivacyOpened = false, auditServicePolling = false, auditWatchUntil = 0, auditBannerDismissed = false;
+let auditPermissionBusy = false, auditPromptSeen = false, auditRequested = false, auditPrivacyOpened = false, auditServicePolling = false, auditWatchUntil = 0, auditBannerDismissed = false, previousAuditState = null;
 const auditPromptKey = 'audit-permission-prompt-v1';
 const uaPlatform = navigator.userAgent;
 const isMac = /Macintosh|Mac OS X/.test(uaPlatform), isWindows = /Windows NT/.test(uaPlatform);
@@ -194,7 +194,8 @@ function renderAudit() {
  if (shouldAskAuditPermission(a, auditPromptSeen || auditDismissed(), busy) && snapshot.writable) openAuditPrompt();
  if (shouldOpenAuditPrivacy(a, auditRequested, auditPrivacyOpened)) { auditPrivacyOpened = true; openAuditPrivacy(); }
  if (a.state === 'running') { auditRequested = false; $('audit-permission-result').textContent = '系统审计已实际连接，辅助程序正以管理员权限接收事件。'; }
- if (a.state === 'running') auditBannerDismissed = false; // 真正连上时重新提示
+ auditBannerDismissed = auditBannerDismissal(auditBannerDismissed, previousAuditState, a.state);
+ previousAuditState = a.state;
  $('audit-banner').hidden = !a.enabled || auditBannerDismissed;
  $('audit-banner').classList.toggle('audit-ready', a.state === 'running');
  $('audit-banner-text').textContent = `${title}：${a.message}${a.state === 'running' ? '' : (snapshot.running ? '。普通文件监控继续运行。' : '。监控已暂停。')}`;

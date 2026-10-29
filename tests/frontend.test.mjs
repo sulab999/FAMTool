@@ -57,3 +57,11 @@ test('run-time banners are dismissible per cause, reappearing only for new cause
   assert(shouldShowErrorBanner('监控引擎写入失败。','原生系统审计不可用或连接异常，普通文件监控继续运行。')); // 新原因重新弹出
   assert(!shouldShowErrorBanner('', 'x'));                       // 无错误不展示
 });
+
+import { auditBannerDismissal } from '../crates/gui/ui/format.js';
+test('audit banner stays dismissed during polling and reappears on reconnection',()=>{
+  assert.equal(auditBannerDismissal(true, 'running', 'running'), true);
+  assert.equal(auditBannerDismissal(true, 'running', 'disconnected'), true);
+  assert.equal(auditBannerDismissal(true, 'disconnected', 'running'), false);
+  assert.equal(auditBannerDismissal(false, null, 'running'), false);
+});
